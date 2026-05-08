@@ -1,5 +1,13 @@
 import MetaTrader5 as mt5
 
+def is_connected():
+    try:
+        if not mt5.initialize():
+            return False
+        return mt5.account_info() is not None
+    except Exception:
+        return False
+
 def connect():
     if not mt5.initialize():
         raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")

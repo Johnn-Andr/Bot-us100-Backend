@@ -78,6 +78,7 @@ def bot_loop():
 def status():
     with state_lock:
         s = dict(state)
+    s["mt5_connected"] = mt5_client.is_connected()
     s["positions"] = mt5_client.get_open_positions("US100") if s["running"] else []
     s["pending_orders"] = mt5_client.get_pending_orders("US100") if s["running"] else []
     s["ny_time"] = strategy.get_ny_now().strftime("%H:%M:%S")

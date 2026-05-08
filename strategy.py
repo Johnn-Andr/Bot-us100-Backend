@@ -7,9 +7,9 @@ SYMBOL = "US100"
 VOLUME = 0.01
 NY_TZ = pytz.timezone("America/New_York")
 
-# NY session open = 9:30 AM, range ends at 10:30 AM
-RANGE_START_HOUR = 9
-RANGE_START_MIN = 30
+# NY session open = 8:00 AM, range ends at 9:00 AM
+RANGE_START_HOUR = 8
+RANGE_START_MIN = 0
 RANGE_DURATION_MINUTES = 60
 
 
