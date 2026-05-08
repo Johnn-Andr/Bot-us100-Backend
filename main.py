@@ -1,5 +1,6 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 import threading
 import time
 import mt5_client
@@ -7,8 +8,8 @@ import strategy
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# Shared bot state
 state = {
     "running": False,
     "phase": "STOPPED",
@@ -23,6 +24,26 @@ state_lock = threading.Lock()
 bot_thread = None
 
 
+def build_payload():
+    with state_lock:
+        s = dict(state)
+    s["mt5_connected"] = mt5_client.is_connected()
+    s["positions"] = mt5_client.get_open_positions("US100") if s["running"] else []
+    s["pending_orders"] = mt5_client.get_pending_orders("US100") if s["running"] else []
+    s["ny_time"] = strategy.get_ny_now().strftime("%H:%M:%S")
+    return s
+
+
+def broadcast():
+    socketio.emit("status", build_payload())
+
+
+def time_ticker():
+    while True:
+        socketio.emit("tick", {"ny_time": strategy.get_ny_now().strftime("%H:%M:%S")})
+        time.sleep(1)
+
+
 def bot_loop():
     try:
         mt5_client.connect()
@@ -31,6 +52,7 @@ def bot_loop():
             state["error"] = str(e)
             state["running"] = False
             state["phase"] = "ERROR"
+        broadcast()
         return
 
     while True:
@@ -40,7 +62,6 @@ def bot_loop():
 
         try:
             phase = strategy.get_bot_phase()
-
             with state_lock:
                 state["phase"] = phase
                 state["error"] = None
@@ -69,20 +90,16 @@ def bot_loop():
             with state_lock:
                 state["error"] = str(e)
 
+        broadcast()
         time.sleep(10)
 
     mt5_client.disconnect()
+    broadcast()
 
 
-@app.route("/status")
-def status():
-    with state_lock:
-        s = dict(state)
-    s["mt5_connected"] = mt5_client.is_connected()
-    s["positions"] = mt5_client.get_open_positions("US100") if s["running"] else []
-    s["pending_orders"] = mt5_client.get_pending_orders("US100") if s["running"] else []
-    s["ny_time"] = strategy.get_ny_now().strftime("%H:%M:%S")
-    return jsonify(s)
+@socketio.on("connect")
+def on_connect():
+    emit("status", build_payload())
 
 
 @app.route("/start", methods=["POST"])
@@ -101,6 +118,7 @@ def start():
 
     bot_thread = threading.Thread(target=bot_loop, daemon=True)
     bot_thread.start()
+    broadcast()
     return jsonify({"message": "Bot started"})
 
 
@@ -111,6 +129,7 @@ def stop():
             return jsonify({"message": "Bot not running"}), 400
         state["running"] = False
         state["phase"] = "STOPPED"
+    broadcast()
     return jsonify({"message": "Bot stopped"})
 
 
@@ -121,9 +140,12 @@ def cancel_orders():
         state["orders_placed"] = False
         state["buy_ticket"] = None
         state["sell_ticket"] = None
+    broadcast()
     return jsonify({"message": "Pending orders cancelled"})
 
 
 if __name__ == "__main__":
+    ticker = threading.Thread(target=time_ticker, daemon=True)
+    ticker.start()
     print("ORB Bot backend running on http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
