@@ -73,6 +73,13 @@ def place_orb_orders(high, low):
     return buy_ticket, sell_ticket
 
 
+def get_current_price():
+    tick = mt5.symbol_info_tick(SYMBOL)
+    if tick is None:
+        return None
+    return tick.bid
+
+
 def get_bot_phase():
     """Returns the current phase of the strategy."""
     _, end = get_range_window()

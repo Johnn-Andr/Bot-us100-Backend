@@ -79,12 +79,27 @@ def bot_loop():
                     high = state["range_high"]
                     low = state["range_low"]
 
-                if not already_placed and high and low:
-                    buy_t, sell_t = strategy.place_orb_orders(high, low)
-                    with state_lock:
-                        state["buy_ticket"] = buy_t
-                        state["sell_ticket"] = sell_t
-                        state["orders_placed"] = True
+                if not already_placed:
+                    # Calcul rétroactif si le bot a démarré après la fin du range
+                    if high is None or low is None:
+                        high, low = strategy.compute_range()
+                        with state_lock:
+                            state["range_high"] = high
+                            state["range_low"] = low
+
+                    if high and low:
+                        current_price = strategy.get_current_price()
+                        if current_price is None or not (low < current_price < high):
+                            # Prix déjà sorti du range → signal manqué
+                            with state_lock:
+                                state["phase"] = "SIGNAL_MISSED"
+                                state["orders_placed"] = True
+                        else:
+                            buy_t, sell_t = strategy.place_orb_orders(high, low)
+                            with state_lock:
+                                state["buy_ticket"] = buy_t
+                                state["sell_ticket"] = sell_t
+                                state["orders_placed"] = True
 
         except RuntimeError as e:
             with state_lock:
