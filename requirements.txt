@@ -3,3 +3,4 @@ flask-cors==4.0.1
 flask-socketio==5.3.6
 MetaTrader5==5.0.5735
 pytz==2024.1
+pytest>=8.0

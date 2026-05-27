@@ -1,10 +1,18 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import time
 import mt5_client
 import strategy
+from crabel import analyze_symbol_full
+from crabel.exceptions import (
+    InsufficientHistoryForStretch,
+    MalformedBarData,
+    MT5DataError,
+    MT5SessionNotInitialized,
+    SymbolNotFound,
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -31,6 +39,13 @@ def build_payload():
     s["positions"] = mt5_client.get_open_positions("US100") if s["running"] else []
     s["pending_orders"] = mt5_client.get_pending_orders("US100") if s["running"] else []
     s["ny_time"] = strategy.get_ny_now().strftime("%H:%M:%S")
+    s["current_price"] = strategy.get_current_price() if s["mt5_connected"] else None
+    # Calcule le range à la demande quand le bot est arrêté et MT5 est connecté
+    if s["mt5_connected"] and not s["running"] and s["range_high"] is None:
+        rh, rl = strategy.compute_range()
+        if rh is not None:
+            s["range_high"] = rh
+            s["range_low"] = rl
     return s
 
 
@@ -40,7 +55,11 @@ def broadcast():
 
 def time_ticker():
     while True:
-        socketio.emit("tick", {"ny_time": strategy.get_ny_now().strftime("%H:%M:%S")})
+        price = strategy.get_current_price() if mt5_client.is_connected() else None
+        socketio.emit("tick", {
+            "ny_time": strategy.get_ny_now().strftime("%H:%M:%S"),
+            "current_price": price,
+        })
         time.sleep(1)
 
 
@@ -148,6 +167,19 @@ def stop():
     return jsonify({"message": "Bot stopped"})
 
 
+@app.route("/detail", methods=["GET"])
+def detail():
+    if not mt5_client.is_connected():
+        return jsonify({"error": "MT5 non connecté"}), 503
+    current_price = strategy.get_current_price()
+    range_high, range_low = strategy.compute_range()
+    return jsonify({
+        "current_price": current_price,
+        "range_high": range_high,
+        "range_low": range_low,
+    })
+
+
 @app.route("/cancel_orders", methods=["POST"])
 def cancel_orders():
     mt5_client.cancel_pending_orders("US100")
@@ -157,6 +189,49 @@ def cancel_orders():
         state["sell_ticket"] = None
     broadcast()
     return jsonify({"message": "Pending orders cancelled"})
+
+
+@app.route("/signals/<symbol>", methods=["GET"])
+def signals(symbol: str):
+    """
+    GET /signals/<symbol>[?target=YYYY-MM-DD|int&doji_threshold=0.10&inside_strict=true&history_days=60]
+
+    Retourne les configurations de prix Crabel pour le symbole donné.
+    La session MT5 doit être active (bot démarré ou terminal connecté).
+    """
+    target_raw = request.args.get("target", None)
+    target = None
+    if target_raw is not None:
+        stripped = target_raw.lstrip("-")
+        if stripped.isdigit() and target_raw.startswith("-"):
+            target = int(target_raw)
+        else:
+            target = target_raw  # chaîne "YYYY-MM-DD" ou invalide (ValueError levée)
+
+    try:
+        result = analyze_symbol_full(
+            symbol,
+            target=target,
+            doji_threshold=float(request.args.get("doji_threshold", 0.10)),
+            inside_strict=request.args.get("inside_strict", "true").lower() != "false",
+            history_days=int(request.args.get("history_days", 60)),
+            stretch_window=int(request.args.get("stretch_window", 10)),
+            atr_period=int(request.args.get("atr_period", 14)),
+            sl_atr_k=float(request.args.get("sl_atr_k", 1.0)),
+        )
+        return jsonify(result)
+    except MT5SessionNotInitialized as exc:
+        return jsonify({"error": "mt5_session", "detail": str(exc)}), 503
+    except SymbolNotFound as exc:
+        return jsonify({"error": "symbol_not_found", "detail": str(exc)}), 404
+    except MT5DataError as exc:
+        return jsonify({"error": "mt5_data", "detail": str(exc)}), 502
+    except InsufficientHistoryForStretch as exc:
+        return jsonify({"error": "insufficient_history", "detail": str(exc)}), 422
+    except MalformedBarData as exc:
+        return jsonify({"error": "malformed_data", "detail": str(exc)}), 422
+    except ValueError as exc:
+        return jsonify({"error": "invalid_param", "detail": str(exc)}), 400
 
 
 if __name__ == "__main__":

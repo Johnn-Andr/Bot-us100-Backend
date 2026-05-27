@@ -32,6 +32,7 @@ def get_range_window():
 
 def compute_range():
     """Returns (high, low) of the 1H NY opening range using M1 bars."""
+    _ensure_symbol()
     start, end = get_range_window()
 
     # Convert to UTC for MT5
@@ -73,7 +74,12 @@ def place_orb_orders(high, low):
     return buy_ticket, sell_ticket
 
 
+def _ensure_symbol():
+    mt5.symbol_select(SYMBOL, True)
+
+
 def get_current_price():
+    _ensure_symbol()
     tick = mt5.symbol_info_tick(SYMBOL)
     if tick is None:
         return None
