@@ -16,6 +16,12 @@ from typing import Optional
 import MetaTrader5 as mt5
 import pytz
 
+import markmiddleton
+
+# Nombre de jours chargés APRÈS date_to pour permettre aux trades en cours
+# d'atteindre naturellement SL/TP sans nouvelle entrée.
+MARKMIDDLETON_EXTENSION_DAYS = 30
+
 NY_TZ = pytz.timezone("America/New_York")
 UTC = pytz.utc
 
@@ -280,6 +286,244 @@ def get_trade_detail_orb(symbol: str, date_str: str, tf: str = "M1") -> dict:
         "range_low": rl,
         "trade": trade,
         "steps": steps,
+    }
+
+
+def get_trade_detail_markmiddleton(
+    symbol: str,
+    trade: dict,
+    tf: str = "M15",
+    candle_type: str = "japanese",
+    padding_bars: int = 30,
+) -> dict:
+    """
+    Recharge la fenêtre de bougies autour d'un trade Markmiddleton pour alimenter le replay.
+
+    `trade` doit contenir : type, entry_time, exit_time, entry_price, sl, tp, pnl, result,
+    ob_top, ob_bottom, ob_left_time.
+
+    `range_high` / `range_low` sont mappés sur OB top / bottom (clé partagée avec
+    TradeReplay qui les rend en lignes pointillées horizontales).
+    """
+    _ensure_symbol(symbol)
+    tf_const = TF_MAP_CHART.get(tf.upper(), mt5.TIMEFRAME_M15)
+
+    tf_seconds_map = {
+        mt5.TIMEFRAME_M1: 60, mt5.TIMEFRAME_M5: 300, mt5.TIMEFRAME_M15: 900,
+        mt5.TIMEFRAME_M30: 1800, mt5.TIMEFRAME_H1: 3600, mt5.TIMEFRAME_H4: 14400,
+        mt5.TIMEFRAME_D1: 86400,
+    }
+    tf_sec = tf_seconds_map.get(tf_const, 900)
+    pad = padding_bars * tf_sec
+
+    ob_left = int(trade["ob_left_time"])
+    entry_t = int(trade["entry_time"])
+    exit_t = int(trade["exit_time"])
+
+    start_utc = datetime.utcfromtimestamp(max(0, ob_left - pad)).replace(tzinfo=UTC)
+    end_utc = datetime.utcfromtimestamp(exit_t + pad).replace(tzinfo=UTC)
+
+    bars = mt5.copy_rates_range(symbol, tf_const, start_utc, end_utc)
+    if bars is None or len(bars) == 0:
+        return {
+            "symbol": symbol,
+            "tf": tf.upper(),
+            "candle_type": candle_type,
+            "candles": [],
+            "range_high": None,
+            "range_low": None,
+            "trade": None,
+            "steps": [],
+        }
+
+    raw_candles = [
+        {
+            "time": int(b["time"]),
+            "open": float(b["open"]),
+            "high": float(b["high"]),
+            "low": float(b["low"]),
+            "close": float(b["close"]),
+        }
+        for b in bars
+    ]
+
+    ctype = (candle_type or "japanese").lower().replace("-", "_")
+    if ctype in ("heikin_ashi", "ha", "heikinashi"):
+        candles = markmiddleton.to_heikin_ashi(raw_candles)
+        ctype = "heikin_ashi"
+    else:
+        candles = raw_candles
+        ctype = "japanese"
+
+    side = trade["type"]
+    ob_top = float(trade["ob_top"])
+    ob_bottom = float(trade["ob_bottom"])
+    entry_price = float(trade["entry_price"])
+    sl = float(trade["sl"])
+    tp = trade.get("tp")
+    tp = float(tp) if tp is not None else None
+    pnl = float(trade["pnl"])
+    result = trade.get("result", "CLOSE")
+
+    exit_label = {
+        "SL": "SL touché",
+        "TP": "TP touché",
+        "BE": "Sortie Break Even",
+        "CLOSE": "Fin de période",
+        "OPEN": "Trade encore ouvert · fin des données",
+    }.get(result, result)
+    ob_label = "bullish" if side == "BUY" else "bearish"
+
+    be_at = trade.get("be_activated_time")
+    be_at = int(be_at) if be_at not in (None, "", "none", "null") else None
+    original_sl = trade.get("original_sl")
+    original_sl = float(original_sl) if original_sl is not None else sl
+
+    # range_start = formation de l'OB ; entry/exit calés sur les bougies de la série
+    steps = [
+        {
+            "time": ob_left,
+            "type": "range_start",
+            "label": f"OB {ob_label} formé · zone {ob_bottom:.2f}–{ob_top:.2f}",
+        },
+        {
+            "time": entry_t,
+            "type": "entry",
+            "label": (
+                f"Entrée {side} à {entry_price:.2f} · SL {original_sl:.2f}"
+                + (f" · TP {tp:.2f}" if tp is not None else "")
+            ),
+        },
+    ]
+
+    if be_at is not None and be_at < exit_t:
+        steps.append({
+            "time": be_at,
+            "type": "be",
+            "label": f"Break Even activé · SL déplacé à {entry_price:.2f}",
+        })
+
+    steps.append({
+        "time": exit_t,
+        "type": "exit",
+        "label": (
+            f"{exit_label}"
+            + (f" · MTM {'+' if pnl >= 0 else ''}{pnl:.2f} pts"
+               if result == "OPEN"
+               else f" · {'+' if pnl >= 0 else ''}{pnl:.2f} pts")
+        ),
+    })
+
+    steps.sort(key=lambda s: s["time"])
+
+    return {
+        "symbol": symbol,
+        "tf": tf.upper(),
+        "candle_type": ctype,
+        "candles": candles,
+        # TradeReplay trace 2 lignes pointillées → ici = top/bottom de l'OB
+        "range_high": ob_top,
+        "range_low": ob_bottom,
+        "trade": {
+            "type": side,
+            "entry_time": entry_t,
+            "entry_price": entry_price,
+            "exit_time": exit_t,
+            "exit_price": float(trade.get("exit_price", entry_price)),
+            "sl": sl,
+            "original_sl": original_sl,
+            "be_activated_time": be_at,
+            "tp": tp,
+            "pnl": pnl,
+            "result": result,
+        },
+        "steps": steps,
+    }
+
+
+def run_markmiddleton_backtest(
+    symbol: str,
+    date_from: str,
+    date_to: str,
+    chart_tf: str = "M15",
+    candle_type: str = "japanese",
+    input_range: int = 25,
+    tp_rr: Optional[float] = 2.0,
+    be_trigger_rr: Optional[float] = None,
+) -> dict:
+    """
+    Backtest de la stratégie Maholy sur les Order Blocks Markmiddleton.
+
+    - Récupère les bougies du `chart_tf` entre date_from et date_to.
+    - Convertit en Heikin Ashi si demandé.
+    - Exécute `markmiddleton.backtest_strategy` qui détecte les OB et simule les trades.
+    """
+    _ensure_symbol(symbol)
+    start_ny = _parse_date(date_from)
+    end_ny = _parse_date(date_to) + timedelta(days=1)
+    if end_ny <= start_ny:
+        raise ValueError("date_to doit être >= date_from")
+
+    # Charge `extension_days` bougies après `date_to` pour laisser les trades en cours
+    # se clôturer naturellement (sans autoriser de nouvelle entrée au-delà du cutoff).
+    end_extended = end_ny + timedelta(days=MARKMIDDLETON_EXTENSION_DAYS)
+    entry_cutoff_unix = int(end_ny.timestamp())
+
+    candles = _fetch_chart(symbol, start_ny, end_extended, chart_tf)
+    if not candles:
+        return {
+            "symbol": symbol,
+            "strategy": "MARKMIDDLETON",
+            "date_from": date_from,
+            "date_to": date_to,
+            "chart_tf": chart_tf.upper(),
+            "candle_type": candle_type,
+            "input_range": input_range,
+            "tp_rr": tp_rr,
+            "entry_cutoff_time": entry_cutoff_unix,
+            "extension_days": MARKMIDDLETON_EXTENSION_DAYS,
+            "candles": [],
+            "trades": [],
+            "equity": [],
+            "stats": markmiddleton._empty_stats(),
+            "obs_created": 0,
+            "open_count": 0,
+        }
+
+    ctype = (candle_type or "japanese").lower().replace("-", "_")
+    if ctype in ("heikin_ashi", "ha", "heikinashi"):
+        sim_candles = markmiddleton.to_heikin_ashi(candles)
+        ctype = "heikin_ashi"
+    else:
+        sim_candles = candles
+        ctype = "japanese"
+
+    result = markmiddleton.backtest_strategy(
+        sim_candles,
+        input_range=input_range,
+        tp_rr=tp_rr,
+        entry_cutoff_time=entry_cutoff_unix,
+        be_trigger_rr=be_trigger_rr,
+    )
+
+    return {
+        "symbol": symbol,
+        "strategy": "MARKMIDDLETON",
+        "date_from": date_from,
+        "date_to": date_to,
+        "chart_tf": chart_tf.upper(),
+        "candle_type": ctype,
+        "input_range": input_range,
+        "tp_rr": tp_rr,
+        "be_trigger_rr": be_trigger_rr,
+        "entry_cutoff_time": entry_cutoff_unix,
+        "extension_days": MARKMIDDLETON_EXTENSION_DAYS,
+        "candles": sim_candles,
+        "trades": result["trades"],
+        "equity": result["equity"],
+        "stats": result["stats"],
+        "obs_created": result["obs_created"],
+        "open_count": result.get("open_count", 0),
     }
 
 

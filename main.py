@@ -261,6 +261,31 @@ def backtest(symbol: str):
     try:
         if strat == "orb":
             result = backtest_engine.run_orb_backtest(symbol, date_from, date_to, chart_tf)
+        elif strat in ("markmiddleton", "maholy", "ob_mm"):
+            candle_type = request.args.get("candle_type", "japanese")
+            try:
+                input_range = int(request.args.get("input_range", 25))
+            except ValueError:
+                return jsonify({"error": "invalid_param", "detail": "input_range doit être un entier"}), 400
+            tp_rr_raw = request.args.get("tp_rr", "2.0")
+            try:
+                tp_rr = None if tp_rr_raw.lower() in ("none", "null", "") else float(tp_rr_raw)
+            except ValueError:
+                return jsonify({"error": "invalid_param", "detail": "tp_rr doit être un nombre ou 'none'"}), 400
+            be_rr_raw = request.args.get("be_trigger_rr", "0")
+            try:
+                be_val = float(be_rr_raw) if be_rr_raw.lower() not in ("none", "null", "") else 0.0
+                be_trigger_rr = None if be_val <= 0 else be_val
+            except ValueError:
+                return jsonify({"error": "invalid_param", "detail": "be_trigger_rr doit être un nombre"}), 400
+            result = backtest_engine.run_markmiddleton_backtest(
+                symbol, date_from, date_to,
+                chart_tf=chart_tf,
+                candle_type=candle_type,
+                input_range=input_range,
+                tp_rr=tp_rr,
+                be_trigger_rr=be_trigger_rr,
+            )
         else:
             return jsonify({"error": "unknown_strategy", "detail": f"Stratégie inconnue : {strat}"}), 400
         return jsonify(result)
@@ -321,14 +346,59 @@ def backtest_trade_detail(symbol: str):
             return jsonify({"error": "mt5_session", "detail": str(exc)}), 503
 
     strat = request.args.get("strategy", "orb").lower()
-    date_str = request.args.get("date")
     tf = request.args.get("tf", "M1")
-    if not date_str:
-        return jsonify({"error": "invalid_param", "detail": "date est requis (YYYY-MM-DD)"}), 400
 
     try:
         if strat == "orb":
+            date_str = request.args.get("date")
+            if not date_str:
+                return jsonify({"error": "invalid_param", "detail": "date est requis (YYYY-MM-DD)"}), 400
             result = backtest_engine.get_trade_detail_orb(symbol, date_str, tf=tf)
+        elif strat in ("markmiddleton", "maholy", "ob_mm"):
+            required = [
+                "entry_time", "exit_time", "type", "entry_price", "sl", "pnl",
+                "ob_top", "ob_bottom", "ob_left_time",
+            ]
+            for k in required:
+                if request.args.get(k) is None:
+                    return jsonify({
+                        "error": "invalid_param",
+                        "detail": f"Paramètre requis manquant : {k}",
+                    }), 400
+            try:
+                be_at_raw = request.args.get("be_activated_time")
+                be_at_val = (
+                    None if be_at_raw in (None, "", "none", "null")
+                    else int(be_at_raw)
+                )
+                original_sl_raw = request.args.get("original_sl")
+                original_sl_val = (
+                    None if original_sl_raw in (None, "", "none", "null")
+                    else float(original_sl_raw)
+                )
+                trade = {
+                    "type": request.args.get("type"),
+                    "entry_time": int(request.args.get("entry_time")),
+                    "exit_time": int(request.args.get("exit_time")),
+                    "entry_price": float(request.args.get("entry_price")),
+                    "exit_price": float(request.args.get("exit_price", request.args.get("entry_price"))),
+                    "sl": float(request.args.get("sl")),
+                    "original_sl": original_sl_val,
+                    "be_activated_time": be_at_val,
+                    "tp": (None if request.args.get("tp") in (None, "", "none", "null")
+                           else float(request.args.get("tp"))),
+                    "pnl": float(request.args.get("pnl")),
+                    "result": request.args.get("result", "CLOSE"),
+                    "ob_top": float(request.args.get("ob_top")),
+                    "ob_bottom": float(request.args.get("ob_bottom")),
+                    "ob_left_time": int(request.args.get("ob_left_time")),
+                }
+            except (TypeError, ValueError) as exc:
+                return jsonify({"error": "invalid_param", "detail": f"Conversion paramètre échouée : {exc}"}), 400
+            candle_type = request.args.get("candle_type", "japanese")
+            result = backtest_engine.get_trade_detail_markmiddleton(
+                symbol, trade, tf=tf, candle_type=candle_type,
+            )
         else:
             return jsonify({"error": "unknown_strategy", "detail": f"Stratégie inconnue : {strat}"}), 400
         return jsonify(result)
