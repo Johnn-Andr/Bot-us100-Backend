@@ -6,6 +6,7 @@ import time
 import mt5_client
 import strategy
 import backtest as backtest_engine
+import markmiddleton
 from crabel import analyze_symbol_full
 from crabel.exceptions import (
     InsufficientHistoryForStretch,
@@ -260,6 +261,74 @@ def backtest(symbol: str):
     try:
         if strat == "orb":
             result = backtest_engine.run_orb_backtest(symbol, date_from, date_to, chart_tf)
+        else:
+            return jsonify({"error": "unknown_strategy", "detail": f"Stratégie inconnue : {strat}"}), 400
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": "invalid_param", "detail": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": "mt5_data", "detail": str(exc)}), 502
+
+
+@app.route("/markmiddleton_ob/<symbol>", methods=["GET"])
+def markmiddleton_ob(symbol: str):
+    """
+    GET /markmiddleton_ob/<symbol>?timeframe=M15&bars=500&input_range=25
+
+    Retourne les Order Blocks détectés selon l'algorithme Markmiddleton
+    (TradingView "Order Blocks" — base de la stratégie Maholy).
+    """
+    if not mt5_client.is_connected():
+        try:
+            mt5_client.connect()
+        except RuntimeError as exc:
+            return jsonify({"error": "mt5_session", "detail": str(exc)}), 503
+
+    timeframe = request.args.get("timeframe", "M15")
+    candle_type = request.args.get("candle_type", "japanese")
+    try:
+        bars = int(request.args.get("bars", 500))
+        input_range = int(request.args.get("input_range", 25))
+    except ValueError:
+        return jsonify({"error": "invalid_param", "detail": "bars/input_range doivent être des entiers"}), 400
+
+    try:
+        result = markmiddleton.analyze(
+            symbol=symbol,
+            timeframe=timeframe,
+            bars=bars,
+            input_range=input_range,
+            candle_type=candle_type,
+        )
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": "invalid_param", "detail": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": "mt5_data", "detail": str(exc)}), 502
+
+
+@app.route("/backtest/trade_detail/<symbol>", methods=["GET"])
+def backtest_trade_detail(symbol: str):
+    """
+    GET /backtest/trade_detail/<symbol>?date=YYYY-MM-DD&strategy=orb
+
+    Recharge les bougies M1 d'une journée pour alimenter le replay.
+    """
+    if not mt5_client.is_connected():
+        try:
+            mt5_client.connect()
+        except RuntimeError as exc:
+            return jsonify({"error": "mt5_session", "detail": str(exc)}), 503
+
+    strat = request.args.get("strategy", "orb").lower()
+    date_str = request.args.get("date")
+    tf = request.args.get("tf", "M1")
+    if not date_str:
+        return jsonify({"error": "invalid_param", "detail": "date est requis (YYYY-MM-DD)"}), 400
+
+    try:
+        if strat == "orb":
+            result = backtest_engine.get_trade_detail_orb(symbol, date_str, tf=tf)
         else:
             return jsonify({"error": "unknown_strategy", "detail": f"Stratégie inconnue : {strat}"}), 400
         return jsonify(result)
