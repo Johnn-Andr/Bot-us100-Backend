@@ -450,6 +450,7 @@ def run_markmiddleton_backtest(
     input_range: int = 25,
     tp_rr: Optional[float] = 2.0,
     be_trigger_rr: Optional[float] = None,
+    min_excursion_rr: Optional[float] = 1.0,
 ) -> dict:
     """
     Backtest de la stratégie Maholy sur les Order Blocks Markmiddleton.
@@ -480,6 +481,8 @@ def run_markmiddleton_backtest(
             "candle_type": candle_type,
             "input_range": input_range,
             "tp_rr": tp_rr,
+            "be_trigger_rr": be_trigger_rr,
+            "min_excursion_rr": min_excursion_rr,
             "entry_cutoff_time": entry_cutoff_unix,
             "extension_days": MARKMIDDLETON_EXTENSION_DAYS,
             "candles": [],
@@ -504,6 +507,7 @@ def run_markmiddleton_backtest(
         tp_rr=tp_rr,
         entry_cutoff_time=entry_cutoff_unix,
         be_trigger_rr=be_trigger_rr,
+        min_excursion_rr=min_excursion_rr,
     )
 
     return {
@@ -516,6 +520,7 @@ def run_markmiddleton_backtest(
         "input_range": input_range,
         "tp_rr": tp_rr,
         "be_trigger_rr": be_trigger_rr,
+        "min_excursion_rr": min_excursion_rr,
         "entry_cutoff_time": entry_cutoff_unix,
         "extension_days": MARKMIDDLETON_EXTENSION_DAYS,
         "candles": sim_candles,

@@ -243,6 +243,7 @@ def backtest_strategy(
     tp_rr: Optional[float] = 2.0,
     entry_cutoff_time: Optional[int] = None,
     be_trigger_rr: Optional[float] = None,
+    min_excursion_rr: Optional[float] = 1.0,
 ) -> Dict:
     """
     Lance l'algorithme Markmiddleton + simule la stratégie Maholy en un seul passage.
@@ -266,6 +267,12 @@ def backtest_strategy(
     en faveur du trade, le SL est déplacé à l'entrée (break even). Si plus tard le prix
     revient jusqu'à l'entrée, le trade sort en `result="BE"` (PnL ≈ 0). Mettre à None
     ou 0 désactive le break even.
+
+    `min_excursion_rr` (optionnel, default 1.0) : filtre de maturation. L'OB doit avoir
+    « parcouru » au moins `min_excursion_rr × (top - bottom)` dans son sens depuis sa
+    création avant qu'une entrée soit possible. Pour un OB bullish, on attend que le
+    high max depuis création atteigne `top + (top - bottom) × min_excursion_rr`.
+    Symétrique pour un OB bearish via le low min. Mettre à None ou 0 désactive le filtre.
     """
     n = len(candles)
     empty = {
@@ -380,6 +387,7 @@ def backtest_strategy(
                     "left_time": int(candles[last_up_index]["time"]),
                     "right_time": t,
                     "mitigated": False,
+                    "extreme_low": l,
                 })
                 short_box_start.append(bar_index)
                 obs_created += 1
@@ -400,6 +408,7 @@ def backtest_strategy(
                         "left_time": int(candles[last_down_index]["time"]),
                         "right_time": t,
                         "mitigated": False,
+                        "extreme_high": h,
                     })
                     long_box_start.append(bar_index + 1)
                     last_long_index = bar_index
@@ -414,6 +423,16 @@ def backtest_strategy(
                 long_boxes.pop(i)
                 long_box_start.pop(i)
             i -= 1
+
+        # ── 5.5. Mise à jour de l'excursion (high max / low min depuis création) ──
+        for lbox in long_boxes:
+            if h > lbox["extreme_high"]:
+                lbox["extreme_high"] = h
+        for sbox in short_boxes:
+            if l < sbox["extreme_low"]:
+                sbox["extreme_low"] = l
+
+        excursion_filter_active = min_excursion_rr is not None and min_excursion_rr > 0
 
         # ── 6. Signal d'entrée AVANT la mise à jour des flags mitigated ──
         # On entre uniquement si pas de position ouverte ET OB pas encore mitigé.
@@ -431,6 +450,10 @@ def backtest_strategy(
                     continue
                 if bar_index <= long_box_start[j]:
                     continue  # OB tout juste créé, on attend une barre de plus
+                if excursion_filter_active:
+                    required_high = lbox["top"] + (lbox["top"] - lbox["bottom"]) * min_excursion_rr
+                    if lbox["extreme_high"] < required_high:
+                        continue
                 if l <= lbox["top"] and o >= lbox["top"] and cl > lbox["top"]:
                     sl = lbox["bottom"]
                     risk = cl - sl
@@ -459,6 +482,10 @@ def backtest_strategy(
                         continue
                     if bar_index <= short_box_start[j]:
                         continue
+                    if excursion_filter_active:
+                        required_low = sbox["bottom"] - (sbox["top"] - sbox["bottom"]) * min_excursion_rr
+                        if sbox["extreme_low"] > required_low:
+                            continue
                     if h >= sbox["bottom"] and o <= sbox["bottom"] and cl < sbox["bottom"]:
                         sl = sbox["top"]
                         risk = sl - cl

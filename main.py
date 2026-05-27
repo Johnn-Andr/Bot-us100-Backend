@@ -278,6 +278,12 @@ def backtest(symbol: str):
                 be_trigger_rr = None if be_val <= 0 else be_val
             except ValueError:
                 return jsonify({"error": "invalid_param", "detail": "be_trigger_rr doit être un nombre"}), 400
+            min_excursion_raw = request.args.get("min_excursion_rr", "1.0")
+            try:
+                min_excursion_val = float(min_excursion_raw) if min_excursion_raw.lower() not in ("none", "null", "") else 0.0
+                min_excursion_rr = None if min_excursion_val <= 0 else min_excursion_val
+            except ValueError:
+                return jsonify({"error": "invalid_param", "detail": "min_excursion_rr doit être un nombre"}), 400
             result = backtest_engine.run_markmiddleton_backtest(
                 symbol, date_from, date_to,
                 chart_tf=chart_tf,
@@ -285,6 +291,7 @@ def backtest(symbol: str):
                 input_range=input_range,
                 tp_rr=tp_rr,
                 be_trigger_rr=be_trigger_rr,
+                min_excursion_rr=min_excursion_rr,
             )
         else:
             return jsonify({"error": "unknown_strategy", "detail": f"Stratégie inconnue : {strat}"}), 400
