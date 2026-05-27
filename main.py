@@ -5,6 +5,7 @@ import threading
 import time
 import mt5_client
 import strategy
+import backtest as backtest_engine
 from crabel import analyze_symbol_full
 from crabel.exceptions import (
     InsufficientHistoryForStretch,
@@ -232,6 +233,40 @@ def signals(symbol: str):
         return jsonify({"error": "malformed_data", "detail": str(exc)}), 422
     except ValueError as exc:
         return jsonify({"error": "invalid_param", "detail": str(exc)}), 400
+
+
+@app.route("/backtest/<symbol>", methods=["GET"])
+def backtest(symbol: str):
+    """
+    GET /backtest/<symbol>?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&strategy=orb&chart_tf=H1
+
+    Lance un backtest historique pour la stratégie demandée.
+    La session MT5 doit être active.
+    """
+    if not mt5_client.is_connected():
+        try:
+            mt5_client.connect()
+        except RuntimeError as exc:
+            return jsonify({"error": "mt5_session", "detail": str(exc)}), 503
+
+    strat = request.args.get("strategy", "orb").lower()
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+    chart_tf = request.args.get("chart_tf", "H1")
+
+    if not date_from or not date_to:
+        return jsonify({"error": "invalid_param", "detail": "date_from et date_to sont requis (YYYY-MM-DD)"}), 400
+
+    try:
+        if strat == "orb":
+            result = backtest_engine.run_orb_backtest(symbol, date_from, date_to, chart_tf)
+        else:
+            return jsonify({"error": "unknown_strategy", "detail": f"Stratégie inconnue : {strat}"}), 400
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": "invalid_param", "detail": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": "mt5_data", "detail": str(exc)}), 502
 
 
 if __name__ == "__main__":
