@@ -244,6 +244,7 @@ def backtest_strategy(
     entry_cutoff_time: Optional[int] = None,
     be_trigger_rr: Optional[float] = None,
     min_excursion_rr: Optional[float] = 1.0,
+    trade_candles: Optional[List[Dict]] = None,
 ) -> Dict:
     """
     Lance l'algorithme Markmiddleton + simule la stratégie Maholy en un seul passage.
@@ -273,6 +274,13 @@ def backtest_strategy(
     création avant qu'une entrée soit possible. Pour un OB bullish, on attend que le
     high max depuis création atteigne `top + (top - bottom) × min_excursion_rr`.
     Symétrique pour un OB bearish via le low min. Mettre à None ou 0 désactive le filtre.
+
+    `trade_candles` (optionnel) : si fourni, doit être une liste de bougies de même longueur
+    que `candles`, alignée index-à-index sur le même `time`. Les `candles` servent à la
+    détection structurelle (BOS, création/mitigation/invalidation OB), tandis que les
+    `trade_candles` servent aux décisions de trading (entrée, SL/TP, BE, excursion 1RR).
+    Cas d'usage : OB détectés en Heikin Ashi mais entrées/exits évaluées sur les bougies
+    japonaises réelles. Si None, `candles` est utilisé pour les deux.
     """
     n = len(candles)
     empty = {
@@ -283,6 +291,13 @@ def backtest_strategy(
     }
     if n < 2:
         return empty
+
+    if trade_candles is None:
+        trade_candles = candles
+    elif len(trade_candles) != n:
+        raise ValueError(
+            f"trade_candles longueur {len(trade_candles)} != candles {n} — les listes doivent être alignées"
+        )
 
     # ── État OB (mêmes variables que compute_order_blocks) ──
     last_down_index = 0
@@ -310,9 +325,13 @@ def backtest_strategy(
     trades: List[Dict] = []
 
     for bar_index in range(n):
+        # Bougie « structure » (HA si activé) : sert à la détection OB, BOS, mitigation, invalidation.
         c = candles[bar_index]
-        o, h, l, cl = c["open"], c["high"], c["low"], c["close"]
+        o_s, h_s, l_s, cl_s = c["open"], c["high"], c["low"], c["close"]
         t = int(c["time"])
+        # Bougie « trade » (toujours japonaise) : sert à entrée, SL/TP, BE, excursion.
+        c_trade = trade_candles[bar_index]
+        o, h, l, cl = c_trade["open"], c_trade["high"], c_trade["low"], c_trade["close"]
 
         # ── 1. Vérifier exit du trade ouvert (avant tout) ──
         if open_trade is not None:
@@ -371,12 +390,12 @@ def backtest_strategy(
             window_start = max(0, bar_index - input_range)
             structure_low = min(b["low"] for b in candles[window_start:bar_index])
 
-        # ── 3. Bearish BOS ──
+        # ── 3. Bearish BOS (structurel) ──
         if (
             prev_close is not None
             and prev_structure_low is not None
             and prev_close >= prev_structure_low
-            and cl < structure_low
+            and cl_s < structure_low
         ):
             if (bar_index - last_up_index) < 1000:
                 short_boxes.append({
@@ -392,11 +411,11 @@ def backtest_strategy(
                 short_box_start.append(bar_index)
                 obs_created += 1
 
-        # ── 4. Loop short boxes : Bullish BOS (mitigation faite plus bas) ──
+        # ── 4. Loop short boxes : Bullish BOS structurel (mitigation faite plus bas) ──
         i = len(short_boxes) - 1
         while i >= 0:
             sbox = short_boxes[i]
-            if cl > sbox["top"]:
+            if cl_s > sbox["top"]:
                 short_boxes.pop(i)
                 short_box_start.pop(i)
                 if (bar_index - last_down_index) < 1000 and bar_index > last_long_index:
@@ -415,11 +434,11 @@ def backtest_strategy(
                     obs_created += 1
             i -= 1
 
-        # ── 5. Invalidation OB haussiers (close < bottom) ──
+        # ── 5. Invalidation OB haussiers (close structurel < bottom) ──
         i = len(long_boxes) - 1
         while i >= 0:
             lbox = long_boxes[i]
-            if cl < lbox["bottom"]:
+            if cl_s < lbox["bottom"]:
                 long_boxes.pop(i)
                 long_box_start.pop(i)
             i -= 1
@@ -513,33 +532,33 @@ def backtest_strategy(
             if not sbox["mitigated"] and bar_index > short_box_start[j] and h > sbox["bottom"] and l < sbox["bottom"]:
                 sbox["mitigated"] = True
 
-        # ── 8. lastDown / lastUp + running max/min ──
-        if cl < o:
-            last_down = h
+        # ── 8. lastDown / lastUp + running max/min (structurel) ──
+        if cl_s < o_s:
+            last_down = h_s
             last_down_index = bar_index
-            last_low = l
-        if cl > o:
+            last_low = l_s
+        if cl_s > o_s:
             last_up_index = bar_index
-            last_up_low = l
-            last_high = h
-        if h > last_high:
-            last_high = h
-        if l < last_low:
-            last_low = l
+            last_up_low = l_s
+            last_high = h_s
+        if h_s > last_high:
+            last_high = h_s
+        if l_s < last_low:
+            last_low = l_s
 
         for lbox in long_boxes:
             lbox["right_time"] = t
         for sbox in short_boxes:
             sbox["right_time"] = t
 
-        prev_close = cl
+        prev_close = cl_s
         prev_structure_low = structure_low
 
     # ── Trade encore ouvert à la fin des données : marqué "OPEN", exclu des stats ──
     # PnL = mark-to-market (entry vs last close), purement indicatif.
     open_count = 0
     if open_trade is not None:
-        _close_trade(open_trade, int(candles[-1]["time"]), float(candles[-1]["close"]), "OPEN", trades)
+        _close_trade(open_trade, int(trade_candles[-1]["time"]), float(trade_candles[-1]["close"]), "OPEN", trades)
         open_count = 1
 
     return {

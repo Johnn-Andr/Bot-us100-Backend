@@ -496,9 +496,12 @@ def run_markmiddleton_backtest(
     ctype = (candle_type or "japanese").lower().replace("-", "_")
     if ctype in ("heikin_ashi", "ha", "heikinashi"):
         sim_candles = markmiddleton.to_heikin_ashi(candles)
+        # Structure en HA, mais entrées / SL / TP évaluées sur les vraies bougies japonaises.
+        trade_candles = candles
         ctype = "heikin_ashi"
     else:
         sim_candles = candles
+        trade_candles = None  # backtest_strategy utilisera sim_candles pour les deux
         ctype = "japanese"
 
     result = markmiddleton.backtest_strategy(
@@ -508,6 +511,7 @@ def run_markmiddleton_backtest(
         entry_cutoff_time=entry_cutoff_unix,
         be_trigger_rr=be_trigger_rr,
         min_excursion_rr=min_excursion_rr,
+        trade_candles=trade_candles,
     )
 
     return {
